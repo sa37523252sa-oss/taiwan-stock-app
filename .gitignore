@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# SQLite / local databases
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Flutter
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/.packages
+app/build/
+
+# IDE
+*.iml
+.idea/
+.vscode/
+
+# Backup files
+*.backup_*
+*.bak
+lib_backup_20260821_230403/
