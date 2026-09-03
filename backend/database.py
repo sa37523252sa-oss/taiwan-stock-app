@@ -7,9 +7,9 @@ BASE_DIR = os.path.dirname(
 )
 
 
-DATABASE = os.path.join(
-    BASE_DIR,
-    "stocks.db"
+DATABASE = os.getenv(
+    "DB_PATH",
+    os.path.join(BASE_DIR, "stocks.db")
 )
 
 
