@@ -85,9 +85,12 @@ def load_asset_types():
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.execute("SELECT code, asset_type FROM stocks")
-
-    out = {r["code"]: (r["asset_type"] or "").upper() for r in cur.fetchall()}
+    # asset_type 是選用欄位，全新部署的資料庫不會有
+    try:
+        cur.execute("SELECT code, asset_type FROM stocks")
+        out = {r["code"]: (r["asset_type"] or "").upper() for r in cur.fetchall()}
+    except Exception:
+        out = {}
 
     conn.close()
 

@@ -36,3 +36,6 @@ app/build/
 *.backup_*
 *.bak
 lib_backup_20260821_230403/
+*.gz
+*.db.gz
+*.log
