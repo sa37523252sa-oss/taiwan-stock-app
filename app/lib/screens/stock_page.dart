@@ -90,12 +90,6 @@ class _StockPageState extends State<StockPage> {
       final financialData =
           await FinancialApi.getFinancial(widget.stockCode);
 
-      print(financialData.quarter.length);
-
-      if (financialData.quarter.isNotEmpty) {
-        print(financialData.quarter.last.eps);
-      }
-
 
 
       setState(() {
@@ -307,18 +301,35 @@ class _StockPageState extends State<StockPage> {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          formatPrice(stock!.price),
-          style: const TextStyle(
-            fontSize: 42,
-            fontWeight: FontWeight.bold,
-            color: Colors.red,
-          ),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Text(
+              formatPrice(stock!.price),
+              style: TextStyle(
+                fontSize: 42,
+                fontWeight: FontWeight.bold,
+                color: _changeColor(stock!.change),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                _changeText(stock!.change, stock!.changePct),
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: _changeColor(stock!.change),
+                ),
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 6),
-        const Text(
-          "今日股價",
-          style: TextStyle(color: Colors.grey),
+        Text(
+          stock!.date == null ? "今日股價" : "${stock!.date} 收盤",
+          style: const TextStyle(color: Colors.grey),
         ),
         const Divider(height: 30),
         Row(
@@ -506,6 +517,22 @@ class _StockPageState extends State<StockPage> {
 
 
 
+
+  /// 台股慣例：漲紅、跌綠、平盤黑。
+  /// 用 change 判斷，不是拿 close 跟 open 比。
+  Color _changeColor(double? change) {
+    if (change == null || change == 0) return Colors.black87;
+    return change > 0 ? Colors.red : Colors.green;
+  }
+
+  String _changeText(double? change, double? changePct) {
+    if (change == null) return "";
+    final sign = change > 0 ? "+" : "";
+    final pct = changePct == null
+        ? ""
+        : " ($sign${changePct.toStringAsFixed(2)}%)";
+    return "$sign${change.toStringAsFixed(2)}$pct";
+  }
 
   Widget _info(String title, String value) {
     return Column(

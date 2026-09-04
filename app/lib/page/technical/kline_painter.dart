@@ -81,6 +81,10 @@ class KlinePainter extends CustomPainter {
     final visibleCandles =
         candles.sublist(begin, end);
 
+    // 空清單的話，下面的 reduce 會丟 StateError，整張圖直接消失。
+    // 寧可什麼都不畫也不要拋例外。
+    if (visibleCandles.isEmpty) return;
+
     // 留白、蠟燭寬度、線寬都依實際畫布寬度換算，平板上（畫布
     // 較寬）比例才不會跑掉。
     final scale = ResponsiveChart.scaleFor(size.width);
@@ -136,15 +140,21 @@ class KlinePainter extends CustomPainter {
 
     final rawRange = maxPrice - minPrice;
 
-    if (rawRange <= 0) return;
+    // 只剩一根 K 棒、或這段期間完全沒波動時 rawRange 會是 0。
+    // 原本直接 return 會讓畫面整片空白，改成給一個最小範圍，
+    // 至少還看得到那根 K 棒和座標軸。
+    final effectiveRange =
+        rawRange > 0 ? rawRange : (maxPrice.abs() * 0.02 + 1);
 
     // 上下各留 5%
-    final padding = rawRange * 0.05;
+    final padding = effectiveRange * 0.05;
 
-    final chartMax = maxPrice + padding;
-    final chartMin = minPrice - padding;
+    final chartMax = maxPrice + padding + (rawRange > 0 ? 0 : effectiveRange / 2);
+    final chartMin = minPrice - padding - (rawRange > 0 ? 0 : effectiveRange / 2);
 
     final priceRange = chartMax - chartMin;
+
+    if (priceRange <= 0) return;
 
     const spacing = 2.0;
 

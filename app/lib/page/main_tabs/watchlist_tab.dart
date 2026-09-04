@@ -323,12 +323,25 @@ class _WatchlistTabState extends State<WatchlistTab> {
                                     spacing * (crossAxisCount - 1)) /
                                 crossAxisCount;
 
+                            // 用固定高度而不是 childAspectRatio。比例會
+                            // 隨螢幕寬度變動：390px 的手機算出來只有
+                            // 111px 高，但卡片內容（標題＋股價＋漲跌＋
+                            // 總量＋本益比）需要約 128px，本益比那行就
+                            // 會溢出到框外。
+                            //
+                            // 乘上 textScale 是因為使用者可能調大系統
+                            // 字級，字變大高度也要跟著長。
+                            final textScale =
+                                MediaQuery.textScalerOf(context).scale(1.0);
+
+                            final cardHeight = 136.0 * textScale;
+
                             return GridView.builder(
                               padding: const EdgeInsets.all(gridPadding),
                               gridDelegate:
-                                  const SliverGridDelegateWithFixedCrossAxisCount(
+                                  SliverGridDelegateWithFixedCrossAxisCount(
                                 crossAxisCount: crossAxisCount,
-                                childAspectRatio: 1.6,
+                                mainAxisExtent: cardHeight,
                                 crossAxisSpacing: spacing,
                                 mainAxisSpacing: spacing,
                               ),

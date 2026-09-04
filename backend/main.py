@@ -1,5 +1,11 @@
 from fastapi import FastAPI
+import os
 from fastapi.middleware.cors import CORSMiddleware
+
+# Demo / 正式環境用 READ_ONLY=1 啟動，所有端點只讀資料庫，不在
+# 請求中打 FinMind。評審點開個股不用等好幾秒，也不會跟每日排程
+# 搶額度。資料由 cron 的 daily_update.sh 負責更新。
+READ_ONLY = os.getenv("READ_ONLY") == "1"
 from database import get_connection
 from update_price import update_one_stock
 from update_financial import update_one_financial
@@ -25,7 +31,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -96,7 +102,8 @@ def ensure_financial(code: str):
 
     if need_update:
         print(f"{code} 更新財報...")
-        safe_update(update_one_financial, code)
+        if not READ_ONLY:
+            safe_update(update_one_financial, code)
 
 
 
@@ -245,14 +252,18 @@ def get_stock(code: str):
     FROM prices
     WHERE code=?
         ORDER BY date DESC
-    LIMIT 1
+    LIMIT 2
 """, (code,))
 
-    price = cursor.fetchone()
+    price_rows = cursor.fetchall()
+    price = price_rows[0] if price_rows else None
+    prev_close = (price_rows[1]["close"] if len(price_rows) > 1 else None)
 
     # 用「最近一個交易日」判斷，不是「今天」——原本的寫法在
     # 週末和國定假日永遠成立，每次開頁面都會白打一次 API。
-    price_need_update = needs_price(code)
+    # READ_ONLY 時整段跳過，不然會印出「更新股價...」卻什麼都
+    # 沒做，還多查一次資料庫。
+    price_need_update = (not READ_ONLY) and needs_price(code)
 
     if price_need_update:
 
@@ -270,10 +281,12 @@ def get_stock(code: str):
             FROM prices
             WHERE code=?
             ORDER BY date DESC
-            LIMIT 1
+            LIMIT 2
         """, (code,))
 
-        price = cursor.fetchone()
+        price_rows = cursor.fetchall()
+        price = price_rows[0] if price_rows else None
+        prev_close = (price_rows[1]["close"] if len(price_rows) > 1 else None)
 
     if price:
 
@@ -285,7 +298,17 @@ def get_stock(code: str):
             "low": price["low"],
             "close": price["close"],
             "price": price["close"],
-            "volume": price["volume"]
+            "volume": price["volume"],
+
+            "prev_close": prev_close,
+            "change": (
+                price["close"] - prev_close
+                if price["close"] is not None and prev_close else None
+            ),
+            "change_pct": (
+                (price["close"] - prev_close) / prev_close * 100
+                if price["close"] is not None and prev_close else None
+            ),
 
         })
 
@@ -519,7 +542,8 @@ def get_kline(code: str, limit: int | None = None):
     # 歷史筆數太少（可能是之前用匿名身份抓資料時被 FinMind
     # 默默限制成只有一個月）就先補一次完整歷史，只在筆數不足
     # 時才會真的觸發抓取，不會每次查詢都重跑。
-    safe_update(ensure_full_history, code)
+    if not READ_ONLY:
+        safe_update(ensure_full_history, code)
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -612,7 +636,8 @@ def ensure_institution(code: str):
 
     if need_update:
         print(f"{code} 更新三大法人...")
-        safe_update(update_one_institution, code)
+        if not READ_ONLY:
+            safe_update(update_one_institution, code)
 
 
 @app.get("/institution/{code}")
@@ -910,7 +935,8 @@ def ensure_holder(code: str):
 
     if need_update:
         print(f"{code} 更新大戶持股...")
-        safe_update(update_one_holder, code)
+        if not READ_ONLY:
+            safe_update(update_one_holder, code)
 
 
 @app.get("/holder/{code}")
@@ -1003,7 +1029,8 @@ def ensure_margin(code: str):
 
     if need_update:
         print(f"{code} 更新資券...")
-        safe_update(update_one_margin, code)
+        if not READ_ONLY:
+            safe_update(update_one_margin, code)
 
 
 @app.get("/margin/{code}")

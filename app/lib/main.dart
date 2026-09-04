@@ -9,6 +9,22 @@ import 'page/main_tabs/market_news_tab.dart';
 import 'page/main_tabs/me_tab.dart';
 
 void main() {
+  // 暫時用的除錯輔助：讓崩潰的元件直接把例外和堆疊印在畫面上，
+  // 而不是顯示一片空白。手機上就看得到錯誤，不用接電腦偵錯。
+  // 問題修好之後把這整段刪掉。
+  ErrorWidget.builder = (FlutterErrorDetails details) {
+    return Material(
+      color: const Color(0xFFFFEBEE),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(12),
+        child: SelectableText(
+          "${details.exception}\n\n${details.stack}",
+          style: const TextStyle(fontSize: 10, color: Colors.black),
+        ),
+      ),
+    );
+  };
+
   runApp(const StockApp());
 }
 
