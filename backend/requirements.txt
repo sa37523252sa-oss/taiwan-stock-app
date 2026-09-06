@@ -8,6 +8,8 @@ charset-normalizer==3.4.9
 click==8.4.2
 curl_cffi==0.15.0
 fastapi==0.139.2
+feedparser==6.0.14
+feedparser-sgmllib==2.1.0
 h11==0.16.0
 idna==3.18
 markdown-it-py==4.2.0
@@ -36,3 +38,7 @@ urllib3==2.7.0
 uvicorn==0.51.0
 websockets==16.1.1
 yfinance==1.5.1
+feedparser==6.0.11
+google-genai==2.22.0
+feedparser==6.0.11
+google-genai==2.22.0

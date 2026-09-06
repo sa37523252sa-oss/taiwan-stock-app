@@ -25,6 +25,13 @@ import feedparser
 
 from database import get_connection
 from news_prefilter import prefilter
+from dotenv import load_dotenv
+
+# .env 裡的 GEMINI_API_KEY 要先載入成環境變數，
+# GeminiProvider() 才讀得到。finmind.py 自己有 load_dotenv，
+# 所以 FinMind 沒事，但這支之前一直漏掉。
+load_dotenv()
+
 from ai_provider import GeminiProvider
 
 
