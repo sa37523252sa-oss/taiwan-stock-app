@@ -918,6 +918,157 @@ def run_portfolio_backtest(
 # 持有到下次審核日再重新篩選、換股。
 
 
+def bulk_load_asset_types(codes):
+    """一次查完所有 asset_type，取代 3118 次單獨查詢"""
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT code, asset_type FROM stocks")
+
+    out = {r["code"]: (r["asset_type"] or "STOCK") for r in cur.fetchall()}
+
+    conn.close()
+
+    return {c: out.get(c, "STOCK") for c in codes}
+
+
+def bulk_load_financial_history(codes):
+    """
+    一次查完全市場財報，取代「每檔各查一次」。
+
+    原本 {code: get_financial_history(code) for code in all_codes}
+    對 3118 檔各開一次 sqlite 連線、各跑一次查詢，光這行就要
+    好幾分鐘。改成單一查詢後由 Python 分組，快幾十倍。
+    """
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT code, year, quarter, pe, dividend_yield, eps, roe, roa,
+               gross_margin, operating_margin, revenue,
+               debt_ratio, free_cash_flow
+        FROM financials
+        ORDER BY code, year ASC, quarter ASC
+    """)
+
+    wanted = set(codes)
+    out = {c: [] for c in codes}
+
+    for r in cur.fetchall():
+
+        code = r["code"]
+
+        if code not in wanted:
+            continue
+
+        out[code].append({
+            "publish_date": get_publish_date(r["year"], r["quarter"]),
+            "pe": r["pe"],
+            "dividend_yield": r["dividend_yield"],
+            "eps": r["eps"],
+            "roe": r["roe"],
+            "roa": r["roa"],
+            "gross_margin": r["gross_margin"],
+            "operating_margin": r["operating_margin"],
+            "revenue": r["revenue"],
+            "debt_ratio": r["debt_ratio"],
+            "free_cash_flow": r["free_cash_flow"],
+        })
+
+    conn.close()
+
+    for v in out.values():
+        v.sort(key=lambda x: x["publish_date"])
+
+    return out
+
+
+def bulk_load_price_series(codes, start_date=None, end_date=None):
+    """
+    一次查完全市場股價。
+
+    除了合併查詢，還多做兩件事：
+
+      只取回測期間 —— 原本抓每檔的全部歷史（2000 年至今），
+      但回測只用得到 start_date~end_date 那一段。指標需要暖身期
+      （MA240 之類），所以往前多留一年。
+
+      跳過沒有股價的股票 —— 3118 檔裡實際有資料的才 1000 多檔，
+      其餘查了也是空清單。
+    """
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    sql = """
+        SELECT code, date, close, high, low, volume, trading_money
+        FROM prices
+    """
+    params = []
+
+    if start_date:
+        # 暖身期一年。MA240 需要 240 個交易日約等於一年，再多留
+        # 就只是白白多載入資料。原本抓全部歷史（2000 年至今），
+        # 光是把 137 萬列組成 dict 就要好幾分鐘。
+        warmup = str(int(start_date[:4]) - 1) + start_date[4:]
+        sql += " WHERE date >= ?"
+        params.append(warmup)
+
+        if end_date:
+            sql += " AND date <= ?"
+            params.append(end_date)
+
+    elif end_date:
+        sql += " WHERE date <= ?"
+        params.append(end_date)
+
+    sql += " ORDER BY code, date ASC"
+
+    # 用 IN 讓 SQLite 先過濾，不要把全市場撈回來再用 Python 篩。
+    # SQLite 的參數上限預設 999，所以分批。
+    wanted = list(codes)
+    out = {}
+
+    where_extra = " AND " if "WHERE" in sql else " WHERE "
+
+    for i in range(0, len(wanted), 800):
+
+        batch = wanted[i:i + 800]
+
+        placeholders = ",".join("?" * len(batch))
+
+        batch_sql = sql.replace(
+            " ORDER BY code, date ASC",
+            f"{where_extra}code IN ({placeholders}) ORDER BY code, date ASC",
+        )
+
+        cur.execute(batch_sql, params + batch)
+
+        # 用 fetchmany 逐批處理，不要 fetchall 一次全塞記憶體
+        while True:
+
+            rows = cur.fetchmany(20000)
+
+            if not rows:
+                break
+
+            for r in rows:
+                out.setdefault(r["code"], []).append({
+                    "date": r["date"], "close": r["close"], "high": r["high"],
+                    "low": r["low"], "volume": r["volume"],
+                    "trading_money": r["trading_money"],
+                })
+
+    conn.close()
+
+    for c in codes:
+        out.setdefault(c, [])
+
+    return out
+
+
 def get_all_stock_codes():
     """全市場所有股票代號，排除加權/櫃買指數這種不是真正股票的項目"""
 
@@ -1545,6 +1696,98 @@ def get_next_trading_day_price(code, audit_date):
     return {"date": row["date"], "close": row["close"]}
 
 
+def prescreen_by_fundamentals(codes, history_cache, screening_groups, end_date):
+    """
+    只看財報條件做一次粗篩，回傳「有機會被選中」的股票。
+
+    目的不是精準判斷，而是避免把全市場的股價都載進記憶體 ——
+    947 檔兩年日線在 1GB 的機器上會直接掉進 swap，跑三分鐘都
+    組不完。真正嚴謹的 point-in-time 判斷仍由主流程負責。
+
+    刻意寬鬆：只要回測結束前「曾經有任何一期」滿足就保留。
+    遇到看不懂的條件型別一律保留，寧可多載也不要漏掉。
+    """
+
+    ops = {
+        ">": lambda a, b: a > b,
+        ">=": lambda a, b: a >= b,
+        "<": lambda a, b: a < b,
+        "<=": lambda a, b: a <= b,
+        "==": lambda a, b: a == b,
+    }
+
+    def simple_bound(cond):
+        """回傳 (欄位, 比較函式, 門檻)，不是單純上下界條件就回 None"""
+
+        t = cond.get("type")
+
+        if t not in ("fundamental_above", "fundamental_below"):
+            return None
+
+        field = cond.get("field")
+        value = cond.get("value")
+
+        if not field or value is None:
+            return None
+
+        op = cond.get("operator")
+
+        if not op:
+            op = ">" if t == "fundamental_above" else "<"
+
+        fn = ops.get(op)
+
+        return (field, fn, value) if fn else None
+
+    # 群組內是 AND，所以只要群組裡「有一個」財報條件，就能用它
+    # 先淘汰不可能入選的股票——群組內其他價格條件留給主流程判斷。
+    #
+    # 但外層群組之間是 OR：只要有任何一個群組完全沒有財報條件，
+    # 那個群組就可能選中任何股票，這時只能全部保留。
+    group_bounds = []
+
+    for group in screening_groups:
+
+        bounds = [b for b in (simple_bound(c) for c in group) if b]
+
+        if not bounds:
+            return list(codes)
+
+        group_bounds.append(bounds)
+
+    keep = []
+
+    for code in codes:
+
+        history = history_cache.get(code)
+
+        if not history:
+            continue
+
+        for bounds in group_bounds:
+
+            group_ok = True
+
+            for field, fn, value in bounds:
+
+                hit = any(
+                    r.get(field) is not None
+                    and r["publish_date"] <= end_date
+                    and fn(r[field], value)
+                    for r in history
+                )
+
+                if not hit:
+                    group_ok = False
+                    break
+
+            if group_ok:
+                keep.append(code)
+                break
+
+    return keep
+
+
 def run_screener_backtest(
     screening_groups,
     start_date,
@@ -1584,12 +1827,30 @@ def run_screener_backtest(
     # 每支股票的財報歷史、股價歷史都只抓一次、快取起來，不要每個
     # 審核時間點都重查一次資料庫（全市場股票數量很多，這樣會
     # 非常慢）。
-    history_cache = {code: get_financial_history(code) for code in all_codes}
-    price_history_cache = {
-        code: get_price_series_for_liquidity(code) for code in all_codes
-    }
+    # 財報很小（只有少數股票有資料），一次全載沒問題
+    history_cache = bulk_load_financial_history(all_codes)
 
-    asset_type_cache = {code: get_asset_type(code) for code in all_codes}
+    asset_type_cache = bulk_load_asset_types(all_codes)
+
+    # 股價完全不同：947 檔 × 兩年日線一次載進記憶體，在 1GB 的
+    # 機器上會直接爆掉、掉進 swap，跑三分鐘還組不完 dict。
+    #
+    # 所以先用財報條件篩一輪，只把「可能被選到」的股票的股價
+    # 載進來。財報條件通常會把 900 多檔砍到幾十檔，記憶體用量
+    # 差一個數量級。
+    candidate_codes = prescreen_by_fundamentals(
+        all_codes, history_cache, screening_groups, end_date
+    )
+
+    print(f"[選股回測] 財報預篩：{len(all_codes)} → {len(candidate_codes)} 檔")
+
+    price_history_cache = bulk_load_price_series(
+        candidate_codes, start_date, end_date
+    )
+
+    all_codes = [c for c in candidate_codes if price_history_cache.get(c)]
+
+    print(f"[選股回測] 實際納入 {len(all_codes)} 檔")
 
     fee_rate = (
         RAW_FEE_RATE * (fee_discount / 10) if fee_discount else RAW_FEE_RATE
@@ -1895,6 +2156,57 @@ def run_screener_backtest(
         combined_curve.append({
             "date": period_start, "value": round(period_value, 2)
         })
+
+        # 換股日之間也要逐日記錄市值。
+        #
+        # 原本只在換股日記一個點，六年的回測只有六個點，而且都是
+        # 半年一次的快照——中間漲跌完全看不到，最大回撤永遠算成
+        # 0（資產曲線單調上升）。股價都已經在記憶體裡，多算幾百天
+        # 幾乎沒有成本。
+        next_date = (
+            rebalance_dates[period_i + 1]
+            if period_i + 1 < len(rebalance_dates)
+            else end_date
+        )
+
+        if holdings_state:
+
+            # 用任一持股的日期序列當交易日曆
+            calendar = []
+
+            for code in holdings_state:
+                series = price_history_cache.get(code) or []
+                if len(series) > len(calendar):
+                    calendar = series
+
+            daily_close = {
+                code: {p["date"]: p["close"]
+                       for p in (price_history_cache.get(code) or [])}
+                for code in holdings_state
+            }
+
+            for bar in calendar:
+
+                d = bar["date"]
+
+                if d <= period_start or d >= next_date:
+                    continue
+
+                value = cash
+
+                for code, state in holdings_state.items():
+
+                    px = daily_close.get(code, {}).get(d)
+
+                    if px is None:
+                        # 那天沒成交（停牌），沿用成本避免市值歸零
+                        value += state["total_cost"]
+                    else:
+                        value += state["shares"] * px
+
+                combined_curve.append({
+                    "date": d, "value": round(value, 2)
+                })
 
     # 回測結束：用最後一個交易日的股價，把目前持股估值，當作
     # 最終資產（不強制真的賣掉，跟庫存股頁面的「未實現市值」
