@@ -1788,6 +1788,50 @@ def prescreen_by_fundamentals(codes, history_cache, screening_groups, end_date):
     return keep
 
 
+def _append_daily_values(curve, holdings_state, price_cache, cash,
+                         after_date, before_date):
+    """
+    把 (after_date, before_date) 之間每個交易日的持股市值加進曲線。
+
+    只在換股日記錄的話，六年回測只有六個點，最大回撤永遠是 0。
+    股價都已經在記憶體裡，多算幾百天幾乎沒有成本。
+    """
+
+    if not holdings_state:
+        return
+
+    # 用持股中最長的日期序列當交易日曆
+    calendar = []
+
+    for code in holdings_state:
+        series = price_cache.get(code) or []
+        if len(series) > len(calendar):
+            calendar = series
+
+    daily_close = {
+        code: {p["date"]: p["close"] for p in (price_cache.get(code) or [])}
+        for code in holdings_state
+    }
+
+    for bar in calendar:
+
+        d = bar["date"]
+
+        if d <= after_date or d >= before_date:
+            continue
+
+        value = cash
+
+        for code, state in holdings_state.items():
+
+            px = daily_close.get(code, {}).get(d)
+
+            # 那天沒成交（停牌），沿用成本避免市值歸零
+            value += state["shares"] * px if px else state["total_cost"]
+
+        curve.append({"date": d, "value": round(value, 2)})
+
+
 def run_screener_backtest(
     screening_groups,
     start_date,
@@ -2169,44 +2213,10 @@ def run_screener_backtest(
             else end_date
         )
 
-        if holdings_state:
-
-            # 用任一持股的日期序列當交易日曆
-            calendar = []
-
-            for code in holdings_state:
-                series = price_history_cache.get(code) or []
-                if len(series) > len(calendar):
-                    calendar = series
-
-            daily_close = {
-                code: {p["date"]: p["close"]
-                       for p in (price_history_cache.get(code) or [])}
-                for code in holdings_state
-            }
-
-            for bar in calendar:
-
-                d = bar["date"]
-
-                if d <= period_start or d >= next_date:
-                    continue
-
-                value = cash
-
-                for code, state in holdings_state.items():
-
-                    px = daily_close.get(code, {}).get(d)
-
-                    if px is None:
-                        # 那天沒成交（停牌），沿用成本避免市值歸零
-                        value += state["total_cost"]
-                    else:
-                        value += state["shares"] * px
-
-                combined_curve.append({
-                    "date": d, "value": round(value, 2)
-                })
+        _append_daily_values(
+            combined_curve, holdings_state, price_history_cache,
+            cash, period_start, next_date,
+        )
 
     # 回測結束：用最後一個交易日的股價，把目前持股估值，當作
     # 最終資產（不強制真的賣掉，跟庫存股頁面的「未實現市值」
@@ -2252,6 +2262,14 @@ def run_screener_backtest(
 
         else:
             final_value += state["total_cost"]
+
+    # 最後一個換股日到回測結束這段，主迴圈涵蓋不到（迴圈是
+    # range(len-1)），要另外補，否則曲線尾端會有半年的空白。
+    if rebalance_dates:
+        _append_daily_values(
+            combined_curve, holdings_state, price_history_cache,
+            cash, rebalance_dates[-1], end_date,
+        )
 
     combined_curve.append({"date": end_date, "value": round(final_value, 2)})
 
